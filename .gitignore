@@ -1,0 +1,19 @@
+.venv/
+.envs/
+__pycache__/
+*.pyc
+scripts/__pycache__/
+
+# Downloaded public inputs and generated benchmark outputs.
+data/
+external/
+results/
+logs/
+benchmarks/benchmark90/hardware.txt
+
+# Local runtime noise.
+.snakemake/
+.nextflow*
+work/
+tmp/
+hail-*.log

@@ -1,0 +1,14 @@
+seed: 20260513
+pop: EUR
+qc_groups:
+  PASS: 30
+  h2_z_insignificant: 30
+  not_EUR_plus_1: 30
+
+pan_ukbb_base_url: https://pan-ukb-us-east-1.s3.amazonaws.com
+phenotype_manifest: https://pan-ukb-us-east-1.s3.amazonaws.com/sumstats_release/phenotype_manifest.tsv.bgz
+h2_manifest: https://pan-ukb-us-east-1.s3.amazonaws.com/sumstats_release/h2_manifest.tsv.bgz
+ldscore_prefix: https://pan-ukb-us-east-1.s3.amazonaws.com/ld_release/UKBB.EUR
+
+ldsc_neale_repo: https://github.com/astheeggeggs/ldsc.git
+ldsc_neale_commit: a4ee4c8aa065a1c9a586c3b678e9b3040bbebafc

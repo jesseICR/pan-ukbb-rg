@@ -1,0 +1,13 @@
+metric	value
+generated_at	2026-05-13T14:03:29.486798
+benchmark_phenotypes	90
+benchmark_pairs	4005
+ldsc_pairs_completed	4005
+result_rows_written	4005
+ldsc_elapsed_seconds_measured	59153.378173
+ldsc_wall_seconds	3760.899015
+ldsc_wall_hours	1.0447
+ldsc_seconds_per_pair	14.76988219
+full_eur_pairs	25629220
+full_eur_single_worker_hours	105150.1556
+prepare_sumstats_elapsed_seconds_sum	19654.365157
