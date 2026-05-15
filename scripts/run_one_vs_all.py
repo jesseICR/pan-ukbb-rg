@@ -118,7 +118,7 @@ def build_cmd(args: argparse.Namespace, list_path: Path, out_prefix: Path) -> li
         if not prlimit:
             return cmd
         bytes_limit = str(int(args.mem_gb_per_job * 1024**3))
-        cmd = [prlimit, "--as", bytes_limit, "--"] + cmd
+        cmd = [prlimit, f"--as={bytes_limit}", "--"] + cmd
     return cmd
 
 
