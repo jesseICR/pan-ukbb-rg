@@ -117,33 +117,52 @@ make setup ENV_MANAGER=conda
 
 The LDSC environment is created under `.envs/ldsc-neale/`, which is local generated state and is not meant to be committed.
 
-## Runtime And Cores
+## Runtime and Hardware
 
-The default is `JOBS=16` for both setup and one-vs-all rg. That may still be too many jobs for a laptop or shared workstation. Use fewer jobs if the machine becomes unresponsive:
+The default is `JOBS=16` for both setup and one-vs-all rg. `JOBS` means concurrent download/conversion jobs during setup or concurrent LDSC chunk jobs during one-vs-all analysis. Use fewer jobs if the machine becomes unresponsive or if network/disk throughput is saturated:
 
 ```bash
 make setup JOBS=8
 python3 scripts/run_one_vs_all.py --phenocode 20016 --jobs 8
 ```
 
-Setup parallelism helps because each job streams, decompresses, filters, and writes a separate GWAS. Scaling is not perfect because network bandwidth, disk writes, gzip decompression, and remote throttling become shared bottlenecks.
+The full run used `JOBS=16` on a Linux workstation with an AMD Ryzen Threadripper PRO 5995WX, 64 physical cores / 128 threads, 503 GiB RAM, and NVMe storage. Runtime on other systems will mainly depend on internet throughput, remote S3 throttling, gzip decompression, disk write speed, and available RAM for parallel LDSC jobs.
+
+The runtimes below are approximate observed wall times from the completed run artifacts and per-GWAS conversion metadata. They are meant as planning guidance, not a guarantee for every network or storage environment.
+
+Observed setup runtime:
+
+| Step | What It Does | Observed Runtime |
+|------|--------------|------------------|
+| `setup-ldsc-env` | Create the isolated Python 2.7 LDSC environment | Short setup step; exact wall time was not recoverable from preserved artifacts |
+| `validate-catalog` | Download Pan-UKBB manifests, build `eur_gwas_manifest.tsv`, and validate 7,160 EUR GWAS rows | Less than 1 minute when rerun locally |
+| `prepare-ldscores` | Download Pan-UKBB EUR LD-score reference files and extract `UKBB.EUR.snps` | Less than 1 minute |
+| `setup-ldsc` | Clone the patched Neale LDSC fork and check out the pinned commit | Less than 1 minute |
+| `prepare-all-sumstats` | Stream every EUR GWAS, filter to EUR LD-score SNPs, and write LDSC-ready `.sumstats.gz` files | About 36.3 hours at `JOBS=16` |
+| Full `make setup` | All setup steps above | About 36-37 hours, dominated by `prepare-all-sumstats` |
+
+The full setup streamed roughly 6.7 TiB from Pan-UKBB and wrote 7,160 prepared sumstats files. The per-GWAS conversion diagnostics in `results/prepare_all/prepare_stats/` recorded about 598 job-hours of conversion work. At `JOBS=16`, the observed wall time for the conversion step was about 36.3 hours. Median per-GWAS conversion time was about 2.8 minutes, with the slowest GWAS taking about 18.9 minutes.
+
+Observed one-vs-all runtime:
+
+| Analysis | Targets | Chunks / Jobs | Observed Runtime |
+|----------|---------|---------------|------------------|
+| Fluid intelligence score, phenocode `20016` | 7,159 EUR GWAS | 16 chunks at `JOBS=16` | About 33 minutes |
+
+For the fluid-intelligence example, all 16 LDSC chunks completed successfully. Individual chunk runtimes ranged from about 29 to 33 minutes. The combined output is `results/one_vs_all/continuous-20016-both_sexes-irnt/rg.tsv`.
 
 From the 90-phenotype benchmark in this repo:
 
-```text
-compressed input: 138.9 GiB
-wall time at 16 jobs: ~31 min
-sum of per-file preparation time: 19,654 sec
-observed parallel efficiency at 16 jobs: ~66%
-```
+| Metric | Value |
+|--------|-------|
+| Benchmark phenotypes | 90 |
+| Genetic-correlation pairs | 4,005 |
+| LDSC wall time | About 1.04 hours |
+| Sum of LDSC worker time | About 16.4 job-hours |
+| Effective runtime per pair | About 14.8 seconds |
+| Sumstats preparation worker time | About 5.5 job-hours |
 
-Extrapolated setup time for the full ~6.7 TiB input:
-
-```text
-8 jobs:  ~34 h ideal, ~40-55 h realistic
-16 jobs: ~17 h ideal, ~26 h based on observed benchmark
-32 jobs: ~8 h ideal, probably ~13-24 h depending on network/disk saturation
-```
+The benchmark is useful for checking that LDSC runs correctly on a new machine, but the full setup is more network- and disk-sensitive because it streams thousands of large Pan-UKBB files.
 
 GPUs are not useful for this workflow. LDSC is CPU-bound Python, and setup is mostly streaming, decompression, filtering, and writing.
 
