@@ -14,7 +14,7 @@ BENCH_PHENOS := data/benchmark90/phenotypes.tsv
 CATALOG := data/catalog/eur_gwas_manifest.tsv
 SUMSTATS_DIR := data/sumstats/eur
 LD_PREFIX := data/ld/UKBB.EUR
-LDSC_DIR := external/ldsc-neale
+LDSC_DIR ?= external/ldsc-neale
 
 .PHONY: all init setup fetch-manifests catalog validate-catalog select-benchmark prepare-ldscores setup-ldsc setup-ldsc-env prepare-sumstats prepare-all-sumstats one-vs-all one-vs-all-dry-run run-benchmark summarize benchmark90 hardware clean-small
 

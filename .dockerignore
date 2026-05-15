@@ -1,0 +1,28 @@
+.git
+.github
+.codex
+.agents
+
+.envs
+.venv
+__pycache__
+*.pyc
+scripts/__pycache__
+
+# Large generated/downloaded runtime state. These live on a mounted volume
+# when the container runs.
+data
+external
+results
+logs
+tmp
+work
+.snakemake
+.nextflow*
+hail-*.log
+
+# Local archives and transient release staging.
+*.zip
+*.tar
+*.tar.gz
+*.tgz

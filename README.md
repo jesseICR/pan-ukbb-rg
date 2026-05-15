@@ -6,6 +6,60 @@ The workflow uses the Neale Lab batching idea: convert Pan-UKBB flat files into 
 
 ## Quick Start
 
+### Docker
+
+The Docker image bundles this repo, Python 3, the pinned Neale LDSC checkout,
+and the Python 2.7 LDSC environment. It does not include the large Pan-UKBB
+data cache; generated files are written to the mounted directory.
+
+Pull the pre-built image:
+
+```bash
+docker pull ghcr.io/jesseicr/pan-ukbb-rg:latest
+```
+
+Run the one-time setup into a persistent host directory:
+
+```bash
+mkdir -p pan-ukbb-rg-work
+docker run --rm \
+  -v "$(pwd)/pan-ukbb-rg-work:/app/pipeline-output" \
+  ghcr.io/jesseicr/pan-ukbb-rg:latest setup --jobs 8
+```
+
+Then compute all genetic correlations involving one GWAS:
+
+```bash
+docker run --rm \
+  -v "$(pwd)/pan-ukbb-rg-work:/app/pipeline-output" \
+  ghcr.io/jesseicr/pan-ukbb-rg:latest one-vs-all --phenocode 20016 --jobs 8
+```
+
+Dry-run phenotype resolution and cache completeness checks:
+
+```bash
+docker run --rm \
+  -v "$(pwd)/pan-ukbb-rg-work:/app/pipeline-output" \
+  ghcr.io/jesseicr/pan-ukbb-rg:latest dry-run --phenocode 20016
+```
+
+Runtime state is written under:
+
+```text
+pan-ukbb-rg-work/data/
+pan-ukbb-rg-work/results/
+pan-ukbb-rg-work/logs/
+```
+
+Build locally:
+
+```bash
+docker build -t pan-ukbb-rg .
+docker run --rm -v "$(pwd)/pan-ukbb-rg-work:/app/pipeline-output" pan-ukbb-rg help
+```
+
+### Local
+
 Clone the repo, then run the one-time setup:
 
 ```bash
