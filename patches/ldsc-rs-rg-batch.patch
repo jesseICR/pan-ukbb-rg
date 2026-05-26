@@ -1,0 +1,728 @@
+diff --git a/src/cli.rs b/src/cli.rs
+index ed752cd..6dbb7e8 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -33,6 +33,8 @@ pub enum Command {
+     H2(H2Args),
+     /// Estimate genetic correlation (replaces --rg in ldsc.py)
+     Rg(RgArgs),
++    /// Estimate genetic correlations for an explicit pair table with cached inputs
++    RgBatch(RgBatchArgs),
+     /// Generate annotation files from BED regions or gene sets (replaces make_annot.py)
+     MakeAnnot(MakeAnnotArgs),
+     /// Generate annotation files by binning continuous variables (Python --cts-bin)
+@@ -581,6 +583,80 @@ pub struct RgArgs {
+     pub verbose_timing: bool,
+ }
+ 
++#[derive(Args)]
++pub struct RgBatchArgs {
++    /// TSV file containing pair_id plus either lead/target or p1/p2 columns.
++    #[arg(long)]
++    pub pairs: String,
++
++    /// Directory containing <phenotype_id>.sumstats.gz files.
++    #[arg(long)]
++    pub sumstats_dir: String,
++
++    /// LD score file prefix (per-chromosome).
++    /// Provide exactly one of --ref-ld-chr or --ref-ld.
++    #[arg(long)]
++    pub ref_ld_chr: Option<String>,
++
++    /// Single LD score file (non-chr-split alternative to --ref-ld-chr).
++    #[arg(long)]
++    pub ref_ld: Option<String>,
++
++    /// Regression weight LD score prefix (per-chromosome).
++    /// Provide exactly one of --w-ld-chr or --w-ld.
++    #[arg(long)]
++    pub w_ld_chr: Option<String>,
++
++    /// Single regression weight LD score file (non-chr-split alternative to --w-ld-chr).
++    #[arg(long)]
++    pub w_ld: Option<String>,
++
++    /// Output TSV path.
++    #[arg(long)]
++    pub out: String,
++
++    /// Optional cap after reading the pair table.
++    #[arg(long)]
++    pub max_pairs: Option<usize>,
++
++    /// Number of SNPs in the LD score reference panel.
++    /// If omitted, reads from .l2.M_5_50 files alongside --ref-ld-chr when possible.
++    #[arg(long = "M")]
++    pub m_snps: Option<f64>,
++
++    /// Use .l2.M instead of .l2.M_5_50 as the M denominator.
++    #[arg(long)]
++    pub not_m_5_50: bool,
++
++    /// Constrain the genetic covariance intercept to 0 rather than estimating it.
++    #[arg(long)]
++    pub no_intercept: bool,
++
++    /// Two-step estimator for gencov.
++    #[arg(long)]
++    pub two_step: Option<f64>,
++
++    /// Remove SNPs with chi²₁·chi²₂ products above CHISQ_MAX before regression.
++    #[arg(long)]
++    pub chisq_max: Option<f64>,
++
++    /// Number of jackknife blocks for SE estimation.
++    #[arg(long, default_value_t = 200)]
++    pub n_blocks: usize,
++
++    /// Skip allele consistency checking between summary statistic files.
++    #[arg(long)]
++    pub no_check_alleles: bool,
++
++    /// Allow |rg| > 1 or negative h2 in output.
++    #[arg(long)]
++    pub return_silly_things: bool,
++
++    /// Print per-section timing breakdown to stderr.
++    #[arg(long)]
++    pub verbose_timing: bool,
++}
++
+ #[derive(Args)]
+ pub struct MakeAnnotArgs {
+     /// PLINK .bim file listing the SNPs to annotate
+diff --git a/src/lib.rs b/src/lib.rs
+index 48ef0c2..d6aed66 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -47,4 +47,4 @@ pub use cts_annot::run as run_cts_annot;
+ pub use l2::run as run_l2;
+ pub use make_annot::run as run_make_annot;
+ pub use munge::run as run_munge;
+-pub use regressions::{run_h2, run_rg};
++pub use regressions::{run_h2, run_rg, run_rg_batch};
+diff --git a/src/main.rs b/src/main.rs
+index 1a0beb1..83a055d 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -18,7 +18,7 @@ use rayon::ThreadPoolBuilder;
+ use tracing_subscriber::EnvFilter;
+ 
+ use ldsc::cli::{Cli, Command};
+-use ldsc::{run_cts_annot, run_h2, run_l2, run_make_annot, run_munge, run_rg};
++use ldsc::{run_cts_annot, run_h2, run_l2, run_make_annot, run_munge, run_rg, run_rg_batch};
+ 
+ fn init_tracing(level: &str) {
+     let filter = EnvFilter::try_from_default_env()
+@@ -32,7 +32,7 @@ fn init_tracing(level: &str) {
+ fn is_subcommand(arg: &str) -> bool {
+     matches!(
+         arg,
+-        "munge-sumstats" | "l2" | "h2" | "rg" | "make-annot" | "cts-annot"
++        "munge-sumstats" | "l2" | "h2" | "rg" | "rg-batch" | "make-annot" | "cts-annot"
+     )
+ }
+ 
+@@ -101,6 +101,7 @@ fn main() -> Result<()> {
+         Command::L2(args) => run_l2(args),
+         Command::H2(args) => run_h2(args),
+         Command::Rg(args) => run_rg(args),
++        Command::RgBatch(args) => run_rg_batch(args),
+         Command::MakeAnnot(args) => run_make_annot(args),
+         Command::CtsAnnot(args) => run_cts_annot(args),
+     }
+diff --git a/src/regressions.rs b/src/regressions.rs
+index f73ff51..c750c4c 100644
+--- a/src/regressions.rs
++++ b/src/regressions.rs
+@@ -6,13 +6,15 @@ use crate::la::{
+ /// Heritability and genetic correlation estimation (h2 / rg).
+ use anyhow::{Context, Result};
+ use faer::{Accum, Par};
++use rayon::prelude::*;
+ use statrs::distribution::StudentsT;
+ use statrs::distribution::{ChiSquared, Continuous, ContinuousCDF, Normal};
+-use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
+ use std::fs::File;
+ use std::io::{BufWriter, Write};
++use std::path::Path;
+ 
+-use crate::cli::{H2Args, RgArgs};
++use crate::cli::{H2Args, RgArgs, RgBatchArgs};
+ use crate::h2::{
+     JackknifeResult, aggregate, combine_twostep, irwls_ldsc, jackknife_fast, ldsc_weights,
+     run_h2_ldsc, update_separators, weight_xy,
+@@ -2066,6 +2068,571 @@ struct RgPairResult {
+     gcov_int_se: f64,
+ }
+ 
++#[derive(Debug, Clone)]
++struct BatchPair {
++    pair_id: String,
++    requested_p1: String,
++    requested_p2: String,
++    lead: String,
++    target: String,
++}
++
++#[derive(Debug)]
++struct DenseTrait {
++    z: Vec<f64>,
++    n: Vec<f64>,
++    a1: Vec<u8>,
++    a2: Vec<u8>,
++}
++
++#[derive(Debug)]
++struct DenseLd {
++    snps: Vec<String>,
++    l2: Vec<f64>,
++    w_l2: Vec<f64>,
++}
++
++fn allele_code(opt: Option<&String>) -> u8 {
++    match opt
++        .and_then(|s| s.as_bytes().first().copied())
++        .map(|b| b.to_ascii_uppercase())
++    {
++        Some(b'A') => 1,
++        Some(b'C') => 2,
++        Some(b'G') => 3,
++        Some(b'T') => 4,
++        _ => 0,
++    }
++}
++
++fn is_valid_allele_pair(a1: u8, a2: u8) -> bool {
++    if !(1..=4).contains(&a1) || !(1..=4).contains(&a2) || a1 == a2 {
++        return false;
++    }
++    !matches!((a1, a2), (1, 4) | (4, 1) | (2, 3) | (3, 2))
++}
++
++fn complement_allele_code(a: u8) -> u8 {
++    match a {
++        1 => 4,
++        4 => 1,
++        2 => 3,
++        3 => 2,
++        _ => a,
++    }
++}
++
++fn match_and_flip_codes(a1: u8, a2: u8, b1: u8, b2: u8) -> Option<bool> {
++    let b1c = complement_allele_code(b1);
++    let b2c = complement_allele_code(b2);
++    if (a1 == b1 && a2 == b2) || (a1 == b1c && a2 == b2c) {
++        return Some(false);
++    }
++    if (a1 == b2 && a2 == b1) || (a1 == b2c && a2 == b1c) {
++        return Some(true);
++    }
++    None
++}
++
++fn build_dense_ld(ref_ld: &Frame, w_ld: &Frame) -> Result<(DenseLd, HashMap<String, usize>)> {
++    let merged = ref_ld
++        .join_inner_on(w_ld, "SNP")
++        .context("joining ref LD and weight LD for dense batch")?;
++    anyhow::ensure!(
++        merged.has_column("L2") && merged.has_column("w_l2"),
++        "dense rg-batch currently requires scalar L2 and w_l2 columns"
++    );
++    let snps = merged.column("SNP")?.as_str()?;
++    let l2 = merged.column("L2")?.cast_to_f64()?;
++    let w_l2 = merged.column("w_l2")?.cast_to_f64()?;
++    let l2 = l2.as_f64()?.to_vec();
++    let w_l2 = w_l2.as_f64()?.to_vec();
++    let snp_vec: Vec<String> = snps
++        .iter()
++        .map(|s| {
++            s.clone()
++                .ok_or_else(|| anyhow::anyhow!("missing SNP value in dense LD table"))
++        })
++        .collect::<Result<_>>()?;
++    let mut snp_to_idx = HashMap::with_capacity(snps.len());
++    for (i, snp) in snp_vec.iter().enumerate() {
++        snp_to_idx.entry(snp.clone()).or_insert(i);
++    }
++    Ok((
++        DenseLd {
++            snps: snp_vec,
++            l2,
++            w_l2,
++        },
++        snp_to_idx,
++    ))
++}
++
++fn load_dense_trait(
++    trait_id: &str,
++    sumstats_dir: &str,
++    ld_snps: &[String],
++    snp_to_idx: &HashMap<String, usize>,
++    n_snps: usize,
++    no_check_alleles: bool,
++) -> Result<DenseTrait> {
++    let path = batch_sumstats_path(sumstats_dir, trait_id);
++    let f = parse::scan_sumstats(&path)
++        .with_context(|| format!("loading dense sumstats '{}'", trait_id))?;
++    let snp_col = f.column("SNP")?.as_str()?;
++    let z_col = f.column("Z")?.cast_to_f64()?;
++    let n_col = f.column("N")?.cast_to_f64()?;
++    let z_src = z_col.as_f64()?;
++    let n_src = n_col.as_f64()?;
++    let a1_src = if no_check_alleles {
++        None
++    } else {
++        Some(f.column("A1")?.as_str()?)
++    };
++    let a2_src = if no_check_alleles {
++        None
++    } else {
++        Some(f.column("A2")?.as_str()?)
++    };
++
++    let aligned_to_ld = f.height() == n_snps
++        && snp_col
++            .iter()
++            .zip(ld_snps.iter())
++            .all(|(observed, expected)| observed.as_deref() == Some(expected.as_str()));
++
++    if aligned_to_ld {
++        let z = z_src.to_vec();
++        let n = n_src.to_vec();
++        let a1 = if no_check_alleles {
++            vec![0u8; n_snps]
++        } else {
++            a1_src
++                .unwrap()
++                .iter()
++                .map(|v| allele_code(v.as_ref()))
++                .collect()
++        };
++        let a2 = if no_check_alleles {
++            vec![0u8; n_snps]
++        } else {
++            a2_src
++                .unwrap()
++                .iter()
++                .map(|v| allele_code(v.as_ref()))
++                .collect()
++        };
++        return Ok(DenseTrait { z, n, a1, a2 });
++    }
++
++    let mut z = vec![f64::NAN; n_snps];
++    let mut n = vec![f64::NAN; n_snps];
++    let mut a1 = vec![0u8; n_snps];
++    let mut a2 = vec![0u8; n_snps];
++    let mut filled = vec![false; n_snps];
++    for i in 0..f.height() {
++        let Some(snp) = snp_col[i].as_ref() else {
++            continue;
++        };
++        let Some(&idx) = snp_to_idx.get(snp.as_str()) else {
++            continue;
++        };
++        if filled[idx] {
++            continue;
++        }
++        filled[idx] = true;
++        z[idx] = z_src[i];
++        n[idx] = n_src[i];
++        if !no_check_alleles {
++            a1[idx] = allele_code(a1_src.and_then(|v| v[i].as_ref()));
++            a2[idx] = allele_code(a2_src.and_then(|v| v[i].as_ref()));
++        }
++    }
++
++    Ok(DenseTrait { z, n, a1, a2 })
++}
++
++#[allow(clippy::too_many_arguments)]
++fn compute_rg_dense_pair(
++    lead: &str,
++    target: &str,
++    t1: &DenseTrait,
++    t2: &DenseTrait,
++    ld: &DenseLd,
++    m_snps: Option<f64>,
++    ref_ld_chr: Option<&str>,
++    not_m_5_50: bool,
++    n_blocks_arg: usize,
++    two_step: Option<f64>,
++    chisq_max: Option<f64>,
++    no_intercept: bool,
++    no_check_alleles: bool,
++) -> Result<RgPairResult> {
++    let n_all = ld.l2.len();
++    let mut z1_v = Vec::with_capacity(n_all);
++    let mut z2_v = Vec::with_capacity(n_all);
++    let mut n1_v = Vec::with_capacity(n_all);
++    let mut n2_v = Vec::with_capacity(n_all);
++    let mut l2_v = Vec::with_capacity(n_all);
++    let mut w_v = Vec::with_capacity(n_all);
++
++    for i in 0..n_all {
++        let z1 = t1.z[i];
++        let mut z2 = t2.z[i];
++        let n1 = t1.n[i];
++        let n2 = t2.n[i];
++        let l2 = ld.l2[i].max(0.0);
++        let w = ld.w_l2[i].max(0.0);
++        if !z1.is_finite()
++            || !z2.is_finite()
++            || !n1.is_finite()
++            || !n2.is_finite()
++            || !l2.is_finite()
++            || !w.is_finite()
++        {
++            continue;
++        }
++        if !no_check_alleles {
++            let a1 = t1.a1[i];
++            let a2 = t1.a2[i];
++            let b1 = t2.a1[i];
++            let b2 = t2.a2[i];
++            if !is_valid_allele_pair(a1, a2) || !is_valid_allele_pair(b1, b2) {
++                continue;
++            }
++            let Some(flip) = match_and_flip_codes(a1, a2, b1, b2) else {
++                continue;
++            };
++            if flip {
++                z2 = -z2;
++            }
++        }
++        if let Some(cmax) = chisq_max
++            && (z1 * z2).abs() >= cmax
++        {
++            continue;
++        }
++        z1_v.push(z1);
++        z2_v.push(z2);
++        n1_v.push(n1);
++        n2_v.push(n2);
++        l2_v.push(l2);
++        w_v.push(w);
++    }
++
++    let n_obs_filtered = z1_v.len();
++    anyhow::ensure!(
++        n_obs_filtered > 0,
++        "No SNPs remaining after filtering for {} vs {}",
++        lead,
++        target
++    );
++
++    let z1 = col_from_vec(z1_v);
++    let z2 = col_from_vec(z2_v);
++    let n1 = col_from_vec(n1_v);
++    let n2 = col_from_vec(n2_v);
++    let w_l2 = col_from_vec(w_v);
++    let ref_l2_k = vec![col_from_vec(l2_v)];
++    let n_blocks = n_obs_filtered.min(n_blocks_arg);
++    let m_vec = resolve_m_vec(
++        m_snps,
++        ref_ld_chr,
++        not_m_5_50,
++        n_obs_filtered,
++        1,
++        None,
++        None,
++    );
++    let h2_int1 = if no_intercept { Some(1.0) } else { None };
++    let h2_int2 = if no_intercept { Some(1.0) } else { None };
++    let gencov_int = if no_intercept { Some(0.0) } else { None };
++
++    let mut z1_sq = col_zeros(col_len(&z1));
++    for i in 0..col_len(&z1) {
++        let v = z1[(i, 0)];
++        z1_sq[(i, 0)] = (v * v).max(0.0);
++    }
++    let hsq1 = run_hsq_ldsc(
++        &z1_sq, &ref_l2_k, &w_l2, &n1, &m_vec, n_blocks, two_step, h2_int1,
++    )?;
++    let mut z2_sq = col_zeros(col_len(&z2));
++    for i in 0..col_len(&z2) {
++        let v = z2[(i, 0)];
++        z2_sq[(i, 0)] = (v * v).max(0.0);
++    }
++    let hsq2 = run_hsq_ldsc(
++        &z2_sq, &ref_l2_k, &w_l2, &n2, &m_vec, n_blocks, two_step, h2_int2,
++    )?;
++    let gencov = run_gencov_ldsc(
++        &z1, &z2, &ref_l2_k, &w_l2, &n1, &n2, &m_vec, n_blocks, two_step, gencov_int, &hsq1,
++        &hsq2,
++    )?;
++
++    let (rg_ratio, rg_se) = if hsq1.tot > 0.0 && hsq2.tot > 0.0 {
++        let rg_ratio = gencov.tot / (hsq1.tot * hsq2.tot).sqrt();
++        let mut denom_delete: Vec<f64> = Vec::with_capacity(n_blocks);
++        for i in 0..n_blocks {
++            let a = hsq1.tot_delete_values[(i, 0)];
++            let b = hsq2.tot_delete_values[(i, 0)];
++            let prod = a * b;
++            let v = if prod.is_finite() && prod >= 0.0 {
++                prod.sqrt()
++            } else {
++                f64::NAN
++            };
++            denom_delete.push(v);
++        }
++        let mut numer_delete = mat_zeros(n_blocks, 1);
++        for b in 0..n_blocks {
++            numer_delete[(b, 0)] = gencov.tot_delete_values[(b, 0)];
++        }
++        let mut denom_delete_mat = mat_zeros(n_blocks, 1);
++        for b in 0..n_blocks {
++            denom_delete_mat[(b, 0)] = denom_delete[b];
++        }
++        let est = col_from_vec(vec![rg_ratio]);
++        let (_cov, se) = ratio_jackknife(&est, &numer_delete, &denom_delete_mat);
++        (rg_ratio, se[(0, 0)])
++    } else {
++        (f64::NAN, f64::NAN)
++    };
++
++    let (rg_z, rg_p) = if rg_se.is_finite() && rg_se != 0.0 {
++        let z = rg_ratio / rg_se;
++        let p = if z.is_finite() {
++            let chi2_dist = ChiSquared::new(1.0).unwrap();
++            1.0 - chi2_dist.cdf(z * z)
++        } else {
++            0.0
++        };
++        (z, p)
++    } else {
++        (f64::INFINITY, 0.0)
++    };
++
++    Ok(RgPairResult {
++        p1: lead.to_string(),
++        p2: target.to_string(),
++        rg: rg_ratio,
++        se: rg_se,
++        z: rg_z,
++        p: rg_p,
++        h2_obs: hsq2.tot,
++        h2_obs_se: hsq2.tot_se,
++        h2_int: hsq2.intercept,
++        h2_int_se: hsq2.intercept_se,
++        gcov_int: gencov.intercept,
++        gcov_int_se: gencov.intercept_se,
++    })
++}
++
++fn read_rg_batch_pairs(path: &str, max_pairs: Option<usize>) -> Result<Vec<BatchPair>> {
++    let content =
++        std::fs::read_to_string(path).with_context(|| format!("reading pair table '{}'", path))?;
++    let mut lines = content.lines().filter(|line| !line.trim().is_empty());
++    let header_line = lines
++        .next()
++        .ok_or_else(|| anyhow::anyhow!("pair table '{}' is empty", path))?;
++    let header: Vec<&str> = header_line.split('\t').collect();
++    let col = |name: &str| header.iter().position(|h| *h == name);
++    let pair_id_i = col("pair_id").context("pair table must contain pair_id column")?;
++    let p1_i = col("p1");
++    let p2_i = col("p2");
++    let requested_p1_i = col("requested_p1");
++    let requested_p2_i = col("requested_p2");
++    let lead_i = col("lead").or(p1_i).context("pair table must contain lead or p1 column")?;
++    let target_i = col("target").or(p2_i).context("pair table must contain target or p2 column")?;
++
++    let mut out = Vec::new();
++    for (line_no, line) in lines.enumerate() {
++        if let Some(max) = max_pairs
++            && out.len() >= max
++        {
++            break;
++        }
++        let fields: Vec<&str> = line.split('\t').collect();
++        anyhow::ensure!(
++            fields.len() >= header.len(),
++            "pair table line {} has {} fields; expected at least {}",
++            line_no + 2,
++            fields.len(),
++            header.len()
++        );
++        let lead = fields[lead_i].to_string();
++        let target = fields[target_i].to_string();
++        let requested_p1 = requested_p1_i
++            .or(p1_i)
++            .map(|i| fields[i].to_string())
++            .unwrap_or_else(|| lead.clone());
++        let requested_p2 = requested_p2_i
++            .or(p2_i)
++            .map(|i| fields[i].to_string())
++            .unwrap_or_else(|| target.clone());
++        out.push(BatchPair {
++            pair_id: fields[pair_id_i].to_string(),
++            requested_p1,
++            requested_p2,
++            lead,
++            target,
++        });
++    }
++    Ok(out)
++}
++
++fn batch_sumstats_path(sumstats_dir: &str, trait_id: &str) -> String {
++    Path::new(sumstats_dir)
++        .join(format!("{}.sumstats.gz", trait_id))
++        .to_string_lossy()
++        .to_string()
++}
++
++fn fmt_rg_value(v: f64) -> String {
++    if v.is_nan() {
++        "NaN".to_string()
++    } else if v.is_infinite() {
++        if v.is_sign_positive() {
++            "inf".to_string()
++        } else {
++            "-inf".to_string()
++        }
++    } else {
++        format!("{:.6}", v)
++    }
++}
++
++pub fn run_rg_batch(args: RgBatchArgs) -> Result<()> {
++    let t_start = web_time::Instant::now();
++    let pairs = read_rg_batch_pairs(&args.pairs, args.max_pairs)?;
++    anyhow::ensure!(!pairs.is_empty(), "No pairs to process");
++    println!("Loaded {} requested pairs from {}", pairs.len(), args.pairs);
++
++    let mut ref_ld = load_ld_ref(args.ref_ld.as_deref(), args.ref_ld_chr.as_deref())
++        .context("loading ref LD scores")?;
++    cast_non_snp_to_f64(&mut ref_ld)?;
++    let mut w_ld = load_ld(args.w_ld.as_deref(), args.w_ld_chr.as_deref(), "w_l2")
++        .context("loading weight LD scores")?;
++    cast_non_snp_to_f64(&mut w_ld)?;
++
++    let (dense_ld, snp_to_idx) = build_dense_ld(&ref_ld, &w_ld)?;
++
++    let mut trait_ids: HashSet<String> = HashSet::new();
++    for pair in &pairs {
++        trait_ids.insert(pair.lead.clone());
++        trait_ids.insert(pair.target.clone());
++    }
++    println!(
++        "Caching {} dense trait arrays across {} LD SNPs",
++        trait_ids.len(),
++        dense_ld.l2.len()
++    );
++
++    let mut trait_ids: Vec<String> = trait_ids.into_iter().collect();
++    trait_ids.sort();
++    let loaded_traits: Vec<Result<(String, DenseTrait)>> = trait_ids
++        .par_iter()
++        .map(|trait_id| {
++            let dense = load_dense_trait(
++                trait_id,
++                &args.sumstats_dir,
++                &dense_ld.snps,
++                &snp_to_idx,
++                dense_ld.l2.len(),
++                args.no_check_alleles,
++            )?;
++            Ok((trait_id.clone(), dense))
++        })
++        .collect();
++    let mut trait_cache: HashMap<String, DenseTrait> = HashMap::with_capacity(loaded_traits.len());
++    for item in loaded_traits {
++        let (trait_id, dense) = item?;
++        trait_cache.insert(trait_id, dense);
++    }
++
++    if args.verbose_timing {
++        eprintln!(
++            "[perf] rg-batch data_load={:.3}s",
++            t_start.elapsed().as_secs_f64()
++        );
++    }
++
++    let computed: Vec<Result<(BatchPair, RgPairResult)>> = pairs
++        .par_iter()
++        .enumerate()
++        .map(|(idx, pair)| {
++            let lead_trait = trait_cache
++                .get(&pair.lead)
++                .with_context(|| format!("lead '{}' not cached", pair.lead))?;
++            let target_trait = trait_cache
++                .get(&pair.target)
++                .with_context(|| format!("target '{}' not cached", pair.target))?;
++            let result = compute_rg_dense_pair(
++                &pair.lead,
++                &pair.target,
++                lead_trait,
++                target_trait,
++                &dense_ld,
++                args.m_snps,
++                args.ref_ld_chr.as_deref(),
++                args.not_m_5_50,
++                args.n_blocks,
++                args.two_step,
++                args.chisq_max,
++                args.no_intercept,
++                args.no_check_alleles,
++            )
++            .with_context(|| {
++                format!(
++                    "computing pair {} ({}/{}) {} vs {}",
++                    pair.pair_id,
++                    idx + 1,
++                    pairs.len(),
++                    pair.lead,
++                    pair.target
++                )
++            })?;
++            Ok((pair.clone(), result))
++        })
++        .collect();
++
++    let out = File::create(&args.out).with_context(|| format!("creating '{}'", args.out))?;
++    let mut writer = BufWriter::new(out);
++    writeln!(
++        writer,
++        "pair_id\trequested_p1\trequested_p2\tp1\tp2\trg\tse\tz\tp\th2_obs\th2_obs_se\th2_int\th2_int_se\tgcov_int\tgcov_int_se"
++    )?;
++
++    for item in computed {
++        let (pair, result) = item?;
++        writeln!(
++            writer,
++            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
++            pair.pair_id,
++            pair.requested_p1,
++            pair.requested_p2,
++            result.p1,
++            result.p2,
++            fmt_rg_value(result.rg),
++            fmt_rg_value(result.se),
++            fmt_rg_value(result.z),
++            fmt_rg_value(result.p),
++            fmt_rg_value(result.h2_obs),
++            fmt_rg_value(result.h2_obs_se),
++            fmt_rg_value(result.h2_int),
++            fmt_rg_value(result.h2_int_se),
++            fmt_rg_value(result.gcov_int),
++            fmt_rg_value(result.gcov_int_se),
++        )?;
++    }
++    writer.flush()?;
++
++    if args.verbose_timing {
++        eprintln!("[perf] rg-batch total={:.3}s", t_start.elapsed().as_secs_f64());
++    }
++    println!("Wrote {} rg rows to {}", pairs.len(), args.out);
++    Ok(())
++}
++
+ /// Print h2 summary matching Python's Hsq.summary() format.
+ fn print_hsq_summary(hsq: &HsqFit, fixed_intercept: Option<f64>) {
+     println!(

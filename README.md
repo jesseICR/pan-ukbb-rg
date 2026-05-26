@@ -90,6 +90,29 @@ python3 scripts/run_one_vs_all.py --query "fluid intelligence"
 
 If a selector matches multiple GWAS, the script prints the matching rows and asks you to use a more specific selector.
 
+To compute genetic correlations for **all EUR GWAS pairs** after the same `make setup` step, use the Rust hybrid all-pairs add-on:
+
+```bash
+make all-rg-dry-run RAYON_THREADS=50 MAX_PARALLEL_SHARDS=1
+make all-rg RAYON_THREADS=50 MAX_PARALLEL_SHARDS=1
+```
+
+This does not change the existing one-vs-all workflow. It consumes the same prepared files from `make setup`:
+
+```text
+data/catalog/eur_gwas_manifest.tsv
+data/sumstats/eur/*.sumstats.gz
+data/ld/UKBB.EUR.l2.ldscore.gz
+data/ld/UKBB.EUR.l2.M_5_50
+```
+
+The all-pairs outputs are written under `results/all_rg/`. Progress and final collection:
+
+```bash
+make all-rg-progress
+make all-rg-collect
+```
+
 ## Requirements
 
 You need:
@@ -101,6 +124,13 @@ You need:
 - public internet access to Pan-UKBB HTTPS URLs
 - at least 150 GiB free disk for the prepared data cache
 - enough RAM/CPU for parallel LDSC jobs
+
+For the optional all-pairs Rust hybrid add-on, you also need one of:
+
+- Rust/Cargo capable of building the patched `sharifhsn/ldsc` checkout, or
+- Docker, which the setup script uses to build the patched Rust binary via `rust:1.91-bookworm`
+
+The all-pairs add-on writes many shard outputs and the final combined rg table. Plan for additional result-space beyond the setup cache; compressed shard outputs for 25.6M pairs are expected to be several GiB, depending on formatting and compression.
 
 No AWS account, AWS credentials, or AWS CLI are required. Pan-UKBB data are downloaded from public HTTPS URLs such as:
 
@@ -150,6 +180,29 @@ Observed one-vs-all runtime:
 | Fluid intelligence score, phenocode `20016` | 7,159 EUR GWAS | 16 chunks at `JOBS=16` | About 33 minutes |
 
 For the fluid-intelligence example, all 16 LDSC chunks completed successfully. Individual chunk runtimes ranged from about 29 to 33 minutes. The combined output is `results/one_vs_all/continuous-20016-both_sexes-irnt/rg.tsv`.
+
+Observed all-pairs Rust hybrid benchmark:
+
+| Engine | Pairs | Threads / Jobs | Observed Runtime |
+|--------|-------|----------------|------------------|
+| Original Neale/Python LDSC | 100 | 8 workers | 161.54 seconds |
+| Existing Rust grouped rg | 100 | 8 workers | 48.77 seconds |
+| New Rust `rg-batch` hybrid | 100 | 8 Rayon threads | 25.74 seconds |
+| New Rust `rg-batch` hybrid | 100 | 16 Rayon threads | 23.41 seconds |
+
+The all-pairs add-on computes all `7160 * 7159 / 2 = 25,629,220` EUR GWAS pairs. On a 50-core machine similar to the Threadripper Pro system above, the current practical estimate is roughly **10-14 days** for the rg step after `make setup` has completed. The estimate is based on the 100-pair hybrid benchmark and may vary with memory bandwidth, allocator overhead, disk speed, and how well the machine handles either one 50-thread shard or several smaller shards.
+
+Start with:
+
+```bash
+make all-rg RAYON_THREADS=50 MAX_PARALLEL_SHARDS=1
+```
+
+If CPU utilization is poor or the machine is more stable with smaller jobs, try the same total core budget split across shards:
+
+```bash
+make all-rg RAYON_THREADS=10 MAX_PARALLEL_SHARDS=5
+```
 
 From the 90-phenotype benchmark in this repo:
 
@@ -243,6 +296,22 @@ results/one_vs_all/<lead_phenotype_id>/chunks/
 
 `lead.tsv` records the selected GWAS metadata. `driver_summary.tsv` records per-chunk runtime/status. `logs/` is for troubleshooting. `chunks/` contains the raw Neale LDSC `.r2` chunk outputs that are combined into `rg.tsv`.
 
+After `make all-rg`, the all-pairs outputs are:
+
+```text
+results/all_rg/metadata/traits.tsv
+results/all_rg/metadata/shards.tsv
+results/all_rg/pair_shards/
+results/all_rg/rg_shards/
+results/all_rg/logs/
+```
+
+`metadata/shards.tsv` records every block-pair shard. `rg_shards/` contains compressed per-shard rg outputs plus `.done` markers. Rerunning `make all-rg` skips shards whose output exists and whose row count matches the expected pair count. `make all-rg-collect` concatenates completed shards into:
+
+```text
+results/all_rg/rg.tsv.gz
+```
+
 Large public inputs and generated outputs under `data/`, `external/`, `results/`, `logs/`, and `.envs/` are gitignored.
 
 ## Dry Runs
@@ -276,6 +345,8 @@ make prepare-all-sumstats
 `make setup-ldsc` checks out the patched Neale LDSC fork from `https://github.com/astheeggeggs/ldsc.git` at commit `a4ee4c8aa065a1c9a586c3b678e9b3040bbebafc`.
 
 `make prepare-all-sumstats` streams every Pan-UKBB EUR GWAS flat file and writes compact LDSC-ready sumstats.
+
+The optional all-pairs add-on is intentionally separate from `make setup`. After setup has produced the shared data cache, `make all-rg` checks out and patches the Rust LDSC rewrite under `external/ldsc-rs-rg-batch/`, builds it under `external/ldsc-rs-rg-batch-target/`, creates block-pair shards, and computes all pairwise rg results.
 
 Expected data volume:
 
