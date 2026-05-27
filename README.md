@@ -1,8 +1,10 @@
-# Pan-UKBB EUR One-vs-All Genetic Correlations
+# Pan-UKBB EUR Genetic Correlations
 
-This repository prepares public Pan-UKBB EUR GWAS summary statistics for LDSC and computes genetic correlations between one selected GWAS and every other EUR GWAS.
+This repository prepares public Pan-UKBB EUR GWAS summary statistics for LDSC and computes genetic correlations either between one selected GWAS and every other EUR GWAS, or across all EUR GWAS pairs.
 
 The workflow uses the Neale Lab batching idea: convert Pan-UKBB flat files into compact LDSC `.sumstats.gz` files, then run the patched Neale LDSC fork with `--rg-file` and `--write-rg` so one lead phenotype can be compared against target chunks in parallel.
+
+The optional all-pairs workflow reuses the same `make setup` data cache but runs a patched Rust LDSC engine with an `rg-batch` command. It computes the same pair-specific LDSC rg model, but organizes work into resumable block-pair shards for throughput.
 
 ## Quick Start
 
@@ -95,6 +97,7 @@ To compute genetic correlations for **all EUR GWAS pairs** after the same `make 
 ```bash
 make all-rg-dry-run RAYON_THREADS=50 MAX_PARALLEL_SHARDS=1
 make all-rg RAYON_THREADS=50 MAX_PARALLEL_SHARDS=1
+make all-rg-collect
 ```
 
 This does not change the existing one-vs-all workflow. It consumes the same prepared files from `make setup`:
@@ -111,6 +114,12 @@ The all-pairs outputs are written under `results/all_rg/`. Progress and final co
 ```bash
 make all-rg-progress
 make all-rg-collect
+```
+
+To validate the Rust batch path against the existing Rust `rg` path on 100 random disjoint trait pairs:
+
+```bash
+make all-rg-validation
 ```
 
 ## Requirements
@@ -203,6 +212,18 @@ If CPU utilization is poor or the machine is more stable with smaller jobs, try 
 ```bash
 make all-rg RAYON_THREADS=10 MAX_PARALLEL_SHARDS=5
 ```
+
+High-level all-pairs design:
+
+1. Traits are split into blocks, defaulting to 256 traits per block.
+2. The runner creates one shard for each upper-triangle block pair: block 0 vs block 0, block 0 vs block 1, block 0 vs block 2, and so on.
+3. A diagonal shard computes only within-block pairs where `i < j`.
+4. An off-diagonal shard computes every pair between the two different blocks.
+5. Because only the upper triangle is used, every GWAS pair is computed exactly once. The workflow does not compute A-vs-B and then B-vs-A.
+6. For each shard, `rg-batch` loads LD scores once and loads the unique traits in that shard once. With the default block size, a shard loads at most 512 traits.
+7. Within the shard, `rg-batch` computes pair-specific LDSC h2/gencov/rg for every pair, preserving pair-specific SNP intersections and allele checks.
+
+So it is not literally running 7,160 one-vs-all jobs. It is closer to running many block-vs-block batches. This captures the useful idea behind one-vs-all batching, but avoids duplicate pairs and keeps each job resumable.
 
 From the 90-phenotype benchmark in this repo:
 
@@ -311,6 +332,17 @@ results/all_rg/logs/
 ```text
 results/all_rg/rg.tsv.gz
 ```
+
+After `make all-rg-validation`, the validation outputs are:
+
+```text
+results/all_rg_validation/random_disjoint_pairs.tsv
+results/all_rg_validation/hybrid_rg.tsv
+results/all_rg_validation/baseline_rg.tsv
+results/all_rg_validation/comparison_summary.json
+```
+
+The validation chooses 100 random pairs using 200 distinct traits when possible. It compares the new Rust `rg-batch` path against the existing Rust `rg` command, which exercises the same LDSC regression code through the older one-pair/one-lead interface.
 
 Large public inputs and generated outputs under `data/`, `external/`, `results/`, `logs/`, and `.envs/` are gitignored.
 
