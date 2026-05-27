@@ -199,7 +199,7 @@ Observed all-pairs Rust hybrid benchmark:
 | New Rust `rg-batch` hybrid | 100 | 8 Rayon threads | 25.74 seconds |
 | New Rust `rg-batch` hybrid | 100 | 16 Rayon threads | 23.41 seconds |
 
-The all-pairs add-on computes all `7160 * 7159 / 2 = 25,629,220` EUR GWAS pairs. On a 50-core machine similar to the Threadripper Pro system above, the current practical estimate is roughly **10-14 days** for the rg step after `make setup` has completed. The estimate is based on the 100-pair hybrid benchmark and may vary with memory bandwidth, allocator overhead, disk speed, and how well the machine handles either one 50-thread shard or several smaller shards.
+The all-pairs add-on computes all `7160 * 7159 / 2 = 25,629,220` EUR GWAS pairs. On a 50-core machine similar to the Threadripper Pro system above, the current practical estimate is roughly **10-16 days** for the rg step after `make setup` has completed, with **about two weeks** as the planning number. The estimate is based on the 100-pair hybrid benchmark and validation run, then scaled to 50 useful compute threads. It may vary with memory bandwidth, allocator overhead, disk speed, and how well the machine handles either one 50-thread shard or several smaller shards.
 
 Start with:
 
