@@ -6,6 +6,14 @@ LDSC_PYTHON ?= $(LDSC_ENV_PREFIX)/bin/python
 ENV_MANAGER ?= micromamba
 JOBS ?= 16
 BENCH_N ?= 90
+RAYON_THREADS ?= 50
+MAX_PARALLEL_SHARDS ?= 1
+TRAIT_BLOCK_SIZE ?= 256
+CARGO_BUILD_JOBS ?= 16
+VALIDATION_PAIRS ?= 100
+VALIDATION_SEED ?= 20260527
+VALIDATION_JOBS ?= 8
+VALIDATION_RAYON_THREADS ?= 8
 
 PAN_BASE := https://pan-ukb-us-east-1.s3.amazonaws.com
 MANIFEST := data/manifests/phenotype_manifest.tsv.bgz
@@ -15,8 +23,13 @@ CATALOG := data/catalog/eur_gwas_manifest.tsv
 SUMSTATS_DIR := data/sumstats/eur
 LD_PREFIX := data/ld/UKBB.EUR
 LDSC_DIR ?= external/ldsc-neale
+LDSC_RS_DIR ?= external/ldsc-rs-rg-batch
+LDSC_RS_TARGET ?= external/ldsc-rs-rg-batch-target
+LDSC_RS_BIN ?= $(LDSC_RS_TARGET)/release/ldsc
+ALL_RG_DIR ?= results/all_rg
+ALL_RG_VALIDATION_DIR ?= results/all_rg_validation
 
-.PHONY: all init setup fetch-manifests catalog validate-catalog select-benchmark prepare-ldscores setup-ldsc setup-ldsc-env prepare-sumstats prepare-all-sumstats one-vs-all one-vs-all-dry-run run-benchmark summarize benchmark90 hardware clean-small
+.PHONY: all init setup fetch-manifests catalog validate-catalog select-benchmark prepare-ldscores setup-ldsc setup-ldsc-env prepare-sumstats prepare-all-sumstats one-vs-all one-vs-all-dry-run setup-ldsc-rs-rg-batch all-rg-prepare all-rg all-rg-dry-run all-rg-progress all-rg-collect all-rg-validation run-benchmark summarize benchmark90 hardware clean-small
 
 all: setup
 
@@ -125,6 +138,67 @@ one-vs-all-dry-run: setup-ldsc setup-ldsc-env catalog prepare-ldscores
 		$(if $(PHENOCODE),--phenocode $(PHENOCODE),) \
 		$(if $(PHENOTYPE_ID),--phenotype-id $(PHENOTYPE_ID),) \
 		$(if $(QUERY),--query "$(QUERY)",)
+
+setup-ldsc-rs-rg-batch:
+	LDSC_RS_DIR="$(LDSC_RS_DIR)" \
+	LDSC_RS_TARGET="$(LDSC_RS_TARGET)" \
+	CARGO_BUILD_JOBS="$(CARGO_BUILD_JOBS)" \
+		bash scripts/setup_ldsc_rs_rg_batch.sh
+
+all-rg-prepare:
+	$(PYTHON) scripts/run_all_rg_hybrid.py \
+		--manifest $(CATALOG) \
+		--sumstats-dir $(SUMSTATS_DIR) \
+		--ld-prefix $(LD_PREFIX) \
+		--ldsc-bin $(LDSC_RS_BIN) \
+		--out-dir $(ALL_RG_DIR) \
+		--trait-block-size $(TRAIT_BLOCK_SIZE) \
+		--prepare-only
+
+all-rg: setup-ldsc-rs-rg-batch
+	$(PYTHON) scripts/run_all_rg_hybrid.py \
+		--manifest $(CATALOG) \
+		--sumstats-dir $(SUMSTATS_DIR) \
+		--ld-prefix $(LD_PREFIX) \
+		--ldsc-bin $(LDSC_RS_BIN) \
+		--out-dir $(ALL_RG_DIR) \
+		--trait-block-size $(TRAIT_BLOCK_SIZE) \
+		--rayon-threads $(RAYON_THREADS) \
+		--max-parallel-shards $(MAX_PARALLEL_SHARDS)
+
+all-rg-dry-run: setup-ldsc-rs-rg-batch
+	$(PYTHON) scripts/run_all_rg_hybrid.py \
+		--manifest $(CATALOG) \
+		--sumstats-dir $(SUMSTATS_DIR) \
+		--ld-prefix $(LD_PREFIX) \
+		--ldsc-bin $(LDSC_RS_BIN) \
+		--out-dir $(ALL_RG_DIR) \
+		--trait-block-size $(TRAIT_BLOCK_SIZE) \
+		--rayon-threads $(RAYON_THREADS) \
+		--max-parallel-shards $(MAX_PARALLEL_SHARDS) \
+		--dry-run
+
+all-rg-progress:
+	$(PYTHON) scripts/run_all_rg_hybrid.py \
+		--out-dir $(ALL_RG_DIR) \
+		--progress
+
+all-rg-collect:
+	$(PYTHON) scripts/run_all_rg_hybrid.py \
+		--out-dir $(ALL_RG_DIR) \
+		--collect
+
+all-rg-validation: setup-ldsc-rs-rg-batch
+	$(PYTHON) scripts/run_all_rg_validation.py \
+		--manifest $(CATALOG) \
+		--sumstats-dir $(SUMSTATS_DIR) \
+		--ld-prefix $(LD_PREFIX) \
+		--ldsc-bin $(LDSC_RS_BIN) \
+		--out-dir $(ALL_RG_VALIDATION_DIR) \
+		--n-pairs $(VALIDATION_PAIRS) \
+		--seed $(VALIDATION_SEED) \
+		--jobs $(VALIDATION_JOBS) \
+		--hybrid-threads $(VALIDATION_RAYON_THREADS)
 
 run-benchmark: setup-ldsc setup-ldsc-env prepare-sumstats
 	mkdir -p results/benchmark90/rg logs/ldsc
